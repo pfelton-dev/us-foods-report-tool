@@ -4,6 +4,7 @@ import zipfile
 import html
 import tempfile
 import os
+import quopri
 from datetime import date
 
 import pandas as pd
@@ -12,7 +13,7 @@ from openpyxl import load_workbook
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 from openpyxl.utils import get_column_letter
 
-APP_TITLE = "US Foods Daily Report Generator v4.1"
+APP_TITLE = "US Foods Daily Report Generator v4.2"
 
 try:
     import extract_msg
@@ -24,7 +25,17 @@ def clean_text(value):
     if value is None:
         return ""
     value = html.unescape(str(value)).replace("\x00", "")
+    value = html.unescape(value)
     return re.sub(r"\s+", " ", value).strip()
+
+
+def normalize_po(value):
+    value = clean_text(value).upper()
+    value = value.replace("\u200b", "").replace("\ufeff", "")
+    value = re.sub(r"\s+", "", value)
+    if value.endswith(".0"):
+        value = value[:-2]
+    return value
 
 
 def fmt_date(value):
@@ -241,47 +252,62 @@ def read_msg_body_with_extract_msg(file_name, data):
                 pass
 
 
+def prepare_email_text(text):
+    if not text:
+        return ""
+
+    text = text.replace("=\r\n", "").replace("=\n", "")
+
+    try:
+        text = quopri.decodestring(text).decode("utf-8", errors="ignore")
+    except Exception:
+        pass
+
+    text = html.unescape(text)
+    text = html.unescape(text)
+    return text
+
+
 def bytes_to_text_fast(file_name, data):
     parts = []
 
-    # Fast raw decode first
     for enc in ["utf-16le", "utf-8", "latin-1"]:
         try:
             decoded = data.decode(enc, errors="ignore")
             if decoded:
-                parts.append(decoded)
+                parts.append(prepare_email_text(decoded))
         except Exception:
             pass
 
     fast_text = "\n".join(parts)
 
-    # Only trust the fast scan if it contains a COMPLETE cXML block
     if "<cXML" in fast_text and "</cXML>" in fast_text:
         return fast_text
 
-    # Otherwise read the Outlook body
     msg_text = read_msg_body_with_extract_msg(file_name, data)
 
     if msg_text:
-        parts.insert(0, msg_text)
+        parts.insert(0, prepare_email_text(msg_text))
 
     return "\n".join(parts)
 
 
 def extract_cxml_records_from_text(text, source_name=""):
+    text = prepare_email_text(text)
+
     chunks = [
         m.group(0)
         for m in re.finditer(r"<cXML\b.*?</cXML>", text, flags=re.I | re.S)
     ]
 
     if not chunks:
-        for m in re.finditer(r'orderID=["\']([^"\']+)["\']', text, flags=re.I):
+        for m in re.finditer(r'orderID\s*=\s*["\']([^"\']+)["\']', text, flags=re.I):
             chunks.append(text[max(0, m.start() - 5000):m.end() + 30000])
 
     records = []
 
     for chunk in chunks:
-        order = re.search(r'orderID=["\']([^"\']+)["\']', chunk, flags=re.I)
+        order = re.search(r'orderID\s*=\s*["\']([^"\']+)["\']', chunk, flags=re.I)
 
         if not order:
             continue
@@ -308,13 +334,13 @@ def extract_cxml_records_from_text(text, source_name=""):
 
         if not ship_date:
             requested = re.search(
-                r'requestedDeliveryDate=["\']([^"\']+)["\']',
+                r'requestedDeliveryDate\s*=\s*["\']([^"\']+)["\']',
                 chunk,
                 flags=re.I,
             )
             ship_date = clean_text(requested.group(1)) if requested else ""
 
-        timestamp = re.search(r'timestamp=["\'](\d{4}-\d{2}-\d{2})', chunk, flags=re.I)
+        timestamp = re.search(r'timestamp\s*=\s*["\'](\d{4}-\d{2}-\d{2})', chunk, flags=re.I)
         received_date = timestamp.group(1) if timestamp else ""
 
         supplier = re.search(
@@ -328,6 +354,7 @@ def extract_cxml_records_from_text(text, source_name=""):
 
         records.append({
             "PO#": po,
+            "PO Key": normalize_po(po),
             "custPONumber": cust_po,
             "Ship Date": ship_date,
             "Received Date": received_date,
@@ -378,7 +405,7 @@ def collect_records(zip_uploads, email_uploads, progress=None):
     best = {}
 
     for rec in records:
-        po = rec["PO#"]
+        po_key = rec["PO Key"]
 
         score = (
             1 if rec.get("FullText") else 0,
@@ -388,10 +415,10 @@ def collect_records(zip_uploads, email_uploads, progress=None):
             len(rec.get("raw", "")),
         )
 
-        if po not in best or score > best[po][0]:
-            best[po] = (score, rec)
+        if po_key not in best or score > best[po_key][0]:
+            best[po_key] = (score, rec)
 
-    return {po: rec for po, (score, rec) in best.items()}, files_seen, len(records)
+    return {po_key: rec for po_key, (score, rec) in best.items()}, files_seen, len(records)
 
 
 def load_tracking(upload):
@@ -518,8 +545,8 @@ def build_report(tracking_upload, cancel_upload, zip_uploads, email_uploads, pro
     progress.write("Merging XML data into open jobs...")
 
     for _, row in master.iterrows():
-        po = clean_text(row["PO#"])
-        rec = po_map.get(po)
+        po_key = normalize_po(row["PO#"])
+        rec = po_map.get(po_key)
         email_found = rec is not None
 
         report_row = make_report_row(row, rec or {}, email_found)
@@ -679,8 +706,8 @@ st.set_page_config(page_title=APP_TITLE, page_icon="📊", layout="wide")
 st.title(APP_TITLE)
 
 st.info(
-    "v4.1: Faster email scanning. Master report is the source of truth. "
-    "Open/non-cancelled jobs stay in the report even when no email/XML is found. "
+    "v4.2: Better PO matching and email-body XML extraction. "
+    "Master report is the source of truth. Open/non-cancelled jobs stay in the report even when no email/XML is found. "
     "Adds Email Found, MISSING EMAILS, FUTURE SHIP DATE EXCLUSIONS, and validation."
 )
 
