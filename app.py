@@ -12,7 +12,7 @@ from openpyxl import load_workbook
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 from openpyxl.utils import get_column_letter
 
-APP_TITLE = "US Foods Daily Report Generator v4"
+APP_TITLE = "US Foods Daily Report Generator v4.1"
 
 try:
     import extract_msg
@@ -60,55 +60,78 @@ def extract_between(text, label, stop_labels):
     text = clean_text(text)
     if not text:
         return ""
+
     pattern = r"\bLAMINATE\b\s*:?" if label.upper() == "LAMINATE" else re.escape(label) + r"\s*:"
     m = re.search(pattern, text, flags=re.I)
+
     if not m:
         return ""
+
     start = m.end()
     stops = []
+
     for stop_label in stop_labels:
         sp = r"\bLAMINATE\b\s*:?" if stop_label.upper() == "LAMINATE" else re.escape(stop_label) + r"\s*:"
         sm = re.search(sp, text[start:], flags=re.I)
         if sm:
             stops.append(start + sm.start())
+
     end = min(stops) if stops else min(len(text), start + 200)
     return clean_text(text[start:end])
 
 
 def get_full_text(blob):
-    fulls = re.findall(r'<Extrinsic\s+name=["\']FullText["\']\s*>(.*?)</Extrinsic>', blob, flags=re.I | re.S)
+    fulls = re.findall(
+        r'<Extrinsic\s+name=["\']FullText["\']\s*>(.*?)</Extrinsic>',
+        blob,
+        flags=re.I | re.S,
+    )
     useful = [clean_text(x) for x in fulls if clean_text(x)]
 
-    comments = re.findall(r'<Extrinsic\s+name=["\']Comment_\d+["\']\s*>(.*?)</Extrinsic>', blob, flags=re.I | re.S)
+    comments = re.findall(
+        r'<Extrinsic\s+name=["\']Comment_\d+["\']\s*>(.*?)</Extrinsic>',
+        blob,
+        flags=re.I | re.S,
+    )
     comment_text = clean_text(" ".join(comments)) if comments else ""
 
     body_text = clean_text(blob)
     candidates = useful + [comment_text, body_text]
     candidates = [x for x in candidates if x]
+
     return max(candidates, key=len) if candidates else ""
 
 
 def extract_spec_value(text, names):
     text = clean_text(text)
+
     for name in names:
         patterns = [
             rf'<SPECIFICATION\s+NAME=["\']{re.escape(name)}["\']\s*>(.*?)</SPECIFICATION>',
             rf'<Extrinsic\s+name=["\']{re.escape(name)}["\']\s*>(.*?)</Extrinsic>',
             rf'\b{re.escape(name)}\b\s*:\s*([^:]+?)(?=\s+[A-Z][A-Z0-9 /#&().-]{{2,}}\s*:|\s+Finished Size\s*:|\s+JobPressInstruction\s*:|$)',
         ]
+
         for pattern in patterns:
             m = re.search(pattern, text, flags=re.I | re.S)
             if m:
                 return clean_text(m.group(1))
+
     return ""
 
 
 def normalize_page_size(value):
     value = clean_text(value)
-    value = re.split(r"\b(COLOR|COATING|PAGE SETUP|PAPER TYPE|BINDERY|COLLATE|QUANTITY|RUSH|LAMINATE)\b\s*: ?", value, flags=re.I)[0].strip()
+    value = re.split(
+        r"\b(COLOR|COATING|PAGE SETUP|PAPER TYPE|BINDERY|COLLATE|QUANTITY|RUSH|LAMINATE)\b\s*: ?",
+        value,
+        flags=re.I,
+    )[0].strip()
+
     m = re.search(r"(\d+(?:\.\d+)?)\s*[xX]\s*(\d+(?:\.\d+)?)", value)
     if m:
         return f"{m.group(1)} X {m.group(2)}"
+
     return value
 
 
@@ -119,6 +142,7 @@ def clean_paper_type(value):
         value,
         flags=re.I,
     )[0].strip(" -")
+
     return value
 
 
@@ -154,6 +178,7 @@ def extract_specs(spec_text, desc_fallback="", supplier_part=""):
 
     if supplier_upper.startswith("TTSCP") and not paper:
         paper = "12pt C1S"
+
     if supplier_upper.startswith("TTSCP") and not page:
         page = "17 X 5"
 
@@ -164,8 +189,12 @@ def extract_specs(spec_text, desc_fallback="", supplier_part=""):
         laminate_text = extract_between(src, "LAMINATE", STOP_LABELS)
 
     lam_upper = f"{laminate_text} {src}".upper()
+
     laminate = "LAMINATE" if (
-        re.search(r"\bLAMINATION\b|\bMATTE LAMINATE\b|\bGLOSS LAMINATE\b|\bLAMINATE\s+(MATTE|GLOSS)", lam_upper)
+        re.search(
+            r"\bLAMINATION\b|\bMATTE LAMINATE\b|\bGLOSS LAMINATE\b|\bLAMINATE\s+(MATTE|GLOSS)",
+            lam_upper,
+        )
         or "MUST BE LAMINATED" in lam_upper
     ) else "NONE"
 
@@ -177,6 +206,7 @@ def read_msg_body_with_extract_msg(file_name, data):
         return ""
 
     temp_path = None
+
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".msg") as tmp:
             tmp.write(data)
@@ -199,8 +229,10 @@ def read_msg_body_with_extract_msg(file_name, data):
             pass
 
         return "\n".join(parts)
+
     except Exception:
         return ""
+
     finally:
         if temp_path and os.path.exists(temp_path):
             try:
@@ -212,10 +244,7 @@ def read_msg_body_with_extract_msg(file_name, data):
 def bytes_to_text_fast(file_name, data):
     parts = []
 
-    msg_text = read_msg_body_with_extract_msg(file_name, data)
-    if msg_text:
-        parts.append(msg_text)
-
+    # Fast raw decode first. This is much faster than opening every .msg file.
     for enc in ["utf-16le", "utf-8", "latin-1"]:
         try:
             decoded = data.decode(enc, errors="ignore")
@@ -224,11 +253,26 @@ def bytes_to_text_fast(file_name, data):
         except Exception:
             pass
 
+    fast_text = "\n".join(parts)
+
+    # If the fast scan already finds cXML/order data, skip slow Outlook parsing.
+    if "<cXML" in fast_text or "orderID=" in fast_text:
+        return fast_text
+
+    # Only use extract_msg when the fast scan cannot find XML/order data.
+    msg_text = read_msg_body_with_extract_msg(file_name, data)
+
+    if msg_text:
+        parts.append(msg_text)
+
     return "\n".join(parts)
 
 
 def extract_cxml_records_from_text(text, source_name=""):
-    chunks = [m.group(0) for m in re.finditer(r"<cXML\b.*?</cXML>", text, flags=re.I | re.S)]
+    chunks = [
+        m.group(0)
+        for m in re.finditer(r"<cXML\b.*?</cXML>", text, flags=re.I | re.S)
+    ]
 
     if not chunks:
         for m in re.finditer(r'orderID=["\']([^"\']+)["\']', text, flags=re.I):
@@ -238,29 +282,46 @@ def extract_cxml_records_from_text(text, source_name=""):
 
     for chunk in chunks:
         order = re.search(r'orderID=["\']([^"\']+)["\']', chunk, flags=re.I)
+
         if not order:
             continue
 
         po = clean_text(order.group(1))
 
-        cust_match = re.search(r'<Extrinsic\s+name=["\']custPONumber["\']\s*>(.*?)</Extrinsic>', chunk, flags=re.I | re.S)
+        cust_match = re.search(
+            r'<Extrinsic\s+name=["\']custPONumber["\']\s*>(.*?)</Extrinsic>',
+            chunk,
+            flags=re.I | re.S,
+        )
         cust_po = clean_text(cust_match.group(1)) if cust_match else ""
 
         if not cust_po:
             fallback = re.search(r"\bMS\d+\b", chunk)
             cust_po = fallback.group(0) if fallback else ""
 
-        ship_match = re.search(r'<Extrinsic\s+name=["\']dateRequired["\']\s*>(.*?)</Extrinsic>', chunk, flags=re.I | re.S)
+        ship_match = re.search(
+            r'<Extrinsic\s+name=["\']dateRequired["\']\s*>(.*?)</Extrinsic>',
+            chunk,
+            flags=re.I | re.S,
+        )
         ship_date = clean_text(ship_match.group(1)) if ship_match else ""
 
         if not ship_date:
-            requested = re.search(r'requestedDeliveryDate=["\']([^"\']+)["\']', chunk, flags=re.I)
+            requested = re.search(
+                r'requestedDeliveryDate=["\']([^"\']+)["\']',
+                chunk,
+                flags=re.I,
+            )
             ship_date = clean_text(requested.group(1)) if requested else ""
 
         timestamp = re.search(r'timestamp=["\'](\d{4}-\d{2}-\d{2})', chunk, flags=re.I)
         received_date = timestamp.group(1) if timestamp else ""
 
-        supplier = re.search(r"<SupplierPartID>(.*?)</SupplierPartID>", chunk, flags=re.I | re.S)
+        supplier = re.search(
+            r"<SupplierPartID>(.*?)</SupplierPartID>",
+            chunk,
+            flags=re.I | re.S,
+        )
         supplier_part = clean_text(supplier.group(1)) if supplier else ""
 
         full_text = get_full_text(chunk)
@@ -292,12 +353,15 @@ def collect_records(zip_uploads, email_uploads, progress=None):
         with zipfile.ZipFile(io.BytesIO(data)) as zf:
             names = [
                 n for n in zf.namelist()
-                if not n.endswith("/") and n.lower().endswith((".msg", ".eml", ".xml", ".txt"))
+                if not n.endswith("/")
+                and n.lower().endswith((".msg", ".eml", ".xml", ".txt"))
             ]
 
+            total = len(names)
+
             for i, name in enumerate(names, start=1):
-                if progress:
-                    progress.write(f"Processing email/XML {i} of {len(names)}: {name}")
+                if progress and (i == 1 or i % 25 == 0 or i == total):
+                    progress.write(f"Processing email/XML {i} of {total}: {name}")
 
                 text = bytes_to_text_fast(name, zf.read(name))
                 records.extend(extract_cxml_records_from_text(text, source_name=name))
@@ -315,6 +379,7 @@ def collect_records(zip_uploads, email_uploads, progress=None):
 
     for rec in records:
         po = rec["PO#"]
+
         score = (
             1 if rec.get("FullText") else 0,
             1 if rec.get("custPONumber") else 0,
@@ -362,13 +427,20 @@ def load_cancelled(upload):
     df = pd.read_excel(io.BytesIO(data))
     df.columns = [clean_text(c) for c in df.columns]
 
-    job_col = "Job #" if "Job #" in df.columns else next((c for c in df.columns if "job" in c.lower()), None)
-    status_col = "Status" if "Status" in df.columns else next((c for c in df.columns if "status" in c.lower()), None)
+    job_col = "Job #" if "Job #" in df.columns else next(
+        (c for c in df.columns if "job" in c.lower()),
+        None,
+    )
+    status_col = "Status" if "Status" in df.columns else next(
+        (c for c in df.columns if "status" in c.lower()),
+        None,
+    )
 
     if not job_col or not status_col:
         return set()
 
     cancelled_df = df[df[status_col].astype(str).str.contains("cancel", case=False, na=False)]
+
     return set(cancelled_df[job_col].astype(str).str.strip())
 
 
@@ -451,7 +523,6 @@ def build_report(tracking_upload, cancel_upload, zip_uploads, email_uploads, pro
         email_found = rec is not None
 
         report_row = make_report_row(row, rec or {}, email_found)
-
         ship_obj = parse_date_obj(rec.get("Ship Date", "") if rec else "")
 
         if ship_obj and ship_obj > today:
@@ -560,7 +631,10 @@ def format_worksheet(ws):
     ws.freeze_panes = "A2"
 
     for col_idx in range(1, ws.max_column + 1):
-        max_len = max(len(str(ws.cell(r, col_idx).value or "")) for r in range(1, ws.max_row + 1))
+        max_len = max(
+            len(str(ws.cell(r, col_idx).value or ""))
+            for r in range(1, ws.max_row + 1)
+        )
         width = min(max(max_len + 2, 10), 60)
         header = clean_text(ws.cell(1, col_idx).value)
 
@@ -577,7 +651,11 @@ def write_excel(final_df, missing_emails_df, future_exclusions_df, stats):
         final_df.to_excel(writer, sheet_name="Filled Report", index=False)
         final_df[final_df["Laminate"].eq("LAMINATE")].to_excel(writer, sheet_name="LAMINATE", index=False)
         final_df[final_df["Coating"].eq("UV")].to_excel(writer, sheet_name="UV COATING", index=False)
-        final_df[(final_df["Laminate"].eq("NONE")) & (final_df["Coating"].eq("NONE"))].to_excel(writer, sheet_name="TRIM TO SIZE", index=False)
+        final_df[
+            (final_df["Laminate"].eq("NONE"))
+            & (final_df["Coating"].eq("NONE"))
+        ].to_excel(writer, sheet_name="TRIM TO SIZE", index=False)
+
         missing_emails_df.to_excel(writer, sheet_name="MISSING EMAILS", index=False)
         future_exclusions_df.to_excel(writer, sheet_name="FUTURE SHIP DATE EXCLUSIONS", index=False)
 
@@ -601,18 +679,29 @@ st.set_page_config(page_title=APP_TITLE, page_icon="📊", layout="wide")
 st.title(APP_TITLE)
 
 st.info(
-    "v4: Master report is the source of truth. Open/non-cancelled jobs stay in the report even when no email/XML is found. "
+    "v4.1: Faster email scanning. Master report is the source of truth. "
+    "Open/non-cancelled jobs stay in the report even when no email/XML is found. "
     "Adds Email Found, MISSING EMAILS, FUTURE SHIP DATE EXCLUSIONS, and validation."
 )
 
 left, right = st.columns(2)
 
 with left:
-    tracking_upload = st.file_uploader("1. Master Tracking Numbers Report", type=["xls", "xlsx"])
-    cancel_upload = st.file_uploader("2. Cancelled Status Report", type=["xlsx", "xls"])
+    tracking_upload = st.file_uploader(
+        "1. Master Tracking Numbers Report",
+        type=["xls", "xlsx"],
+    )
+    cancel_upload = st.file_uploader(
+        "2. Cancelled Status Report",
+        type=["xlsx", "xls"],
+    )
 
 with right:
-    zip_uploads = st.file_uploader("3. US Foods Outlook ZIP file(s)", type=["zip"], accept_multiple_files=True)
+    zip_uploads = st.file_uploader(
+        "3. US Foods Outlook ZIP file(s)",
+        type=["zip"],
+        accept_multiple_files=True,
+    )
     email_uploads = st.file_uploader(
         "Optional: individual .msg, .eml, .xml, .txt files",
         type=["msg", "eml", "xml", "txt"],
@@ -634,10 +723,19 @@ if st.button("Generate Report", type="primary"):
     else:
         try:
             final_df, missing_emails_df, future_exclusions_df, stats = build_report(
-                tracking_upload, cancel_upload, zip_uploads, email_uploads, status
+                tracking_upload,
+                cancel_upload,
+                zip_uploads,
+                email_uploads,
+                status,
             )
 
-            report_bytes = write_excel(final_df, missing_emails_df, future_exclusions_df, stats)
+            report_bytes = write_excel(
+                final_df,
+                missing_emails_df,
+                future_exclusions_df,
+                stats,
+            )
 
             st.success("Report generated successfully.")
 
@@ -664,7 +762,9 @@ if st.button("Generate Report", type="primary"):
             blank_counts = final_df.eq("").sum()
 
             if blank_counts.sum() > 0:
-                st.warning("Some blanks were detected. Check Email Found and MISSING EMAILS for missing XML/email matches.")
+                st.warning(
+                    "Some blanks were detected. Check Email Found and MISSING EMAILS for missing XML/email matches."
+                )
                 st.dataframe(blank_counts.rename("Blank Count"))
             else:
                 st.info("No blank fields detected.")
