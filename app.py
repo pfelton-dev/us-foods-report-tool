@@ -244,7 +244,7 @@ def read_msg_body_with_extract_msg(file_name, data):
 def bytes_to_text_fast(file_name, data):
     parts = []
 
-    # Fast raw decode first. This is much faster than opening every .msg file.
+    # Fast raw decode first
     for enc in ["utf-16le", "utf-8", "latin-1"]:
         try:
             decoded = data.decode(enc, errors="ignore")
@@ -255,15 +255,15 @@ def bytes_to_text_fast(file_name, data):
 
     fast_text = "\n".join(parts)
 
-    # If the fast scan already finds cXML/order data, skip slow Outlook parsing.
-    if "<cXML" in fast_text or "orderID=" in fast_text:
+    # Only trust the fast scan if it contains a COMPLETE cXML block
+    if "<cXML" in fast_text and "</cXML>" in fast_text:
         return fast_text
 
-    # Only use extract_msg when the fast scan cannot find XML/order data.
+    # Otherwise read the Outlook body
     msg_text = read_msg_body_with_extract_msg(file_name, data)
 
     if msg_text:
-        parts.append(msg_text)
+        parts.insert(0, msg_text)
 
     return "\n".join(parts)
 
