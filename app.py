@@ -13,7 +13,7 @@ from openpyxl import load_workbook
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 from openpyxl.utils import get_column_letter
 
-APP_TITLE = "US Foods Daily Report Generator v4.2"
+APP_TITLE = "US Foods Daily Report Generator v4.3"
 
 try:
     import extract_msg
@@ -27,6 +27,14 @@ def clean_text(value):
     value = html.unescape(str(value)).replace("\x00", "")
     value = html.unescape(value)
     return re.sub(r"\s+", " ", value).strip()
+
+
+def clean_xml_fragments(value):
+    value = clean_text(value)
+    value = re.sub(r"</?Extrinsic[^>]*>", " ", value, flags=re.I)
+    value = re.sub(r"</?[^>]+>", " ", value, flags=re.I)
+    value = re.sub(r"\s+", " ", value)
+    return value.strip(" -")
 
 
 def normalize_po(value):
@@ -132,7 +140,7 @@ def extract_spec_value(text, names):
 
 
 def normalize_page_size(value):
-    value = clean_text(value)
+    value = clean_xml_fragments(value)
     value = re.split(
         r"\b(COLOR|COATING|PAGE SETUP|PAPER TYPE|BINDERY|COLLATE|QUANTITY|RUSH|LAMINATE)\b\s*: ?",
         value,
@@ -147,14 +155,14 @@ def normalize_page_size(value):
 
 
 def clean_paper_type(value):
-    value = clean_text(value)
+    value = clean_xml_fragments(value)
     value = re.split(
         r"\b(BINDERY|COATING|COLLATE|QUANTITY|RUSH|PAGE SETUP|PAGE SIZE|COLOR|Finished Size|JobPressInstruction|LAMINATE)\b\s*: ?",
         value,
         flags=re.I,
     )[0].strip(" -")
 
-    return value
+    return clean_xml_fragments(value)
 
 
 def extract_specs(spec_text, desc_fallback="", supplier_part=""):
@@ -492,8 +500,8 @@ def make_report_row(row, rec, email_found):
         "PO#": clean_text(row["PO#"]),
         "custPONumber": clean_text(rec.get("custPONumber", "")) if rec else "",
         "Email Found": "YES" if email_found else "NO",
-        "Ship Date": fmt_date(rec.get("Ship Date", "")) if rec else "",
-        "Received Date": fmt_date(rec.get("Received Date", "")) if rec else "",
+        "USF Date": fmt_date(rec.get("Ship Date", "")) if rec else "",
+        "Recv Date": fmt_date(rec.get("Received Date", "")) if rec else "",
         "Paper Type": paper,
         "Page Size": page,
         "Laminate": laminate,
@@ -514,7 +522,7 @@ def sort_report(df):
 
     df = df.copy()
     df["_priority"] = df.apply(priority, axis=1)
-    df["_ship_sort"] = pd.to_datetime(df["Ship Date"], errors="coerce")
+    df["_ship_sort"] = pd.to_datetime(df["USF Date"], errors="coerce")
     df = df.sort_values(["_priority", "_ship_sort", "PO#"], na_position="last")
 
     return df.drop(columns=["_priority", "_ship_sort"])
@@ -554,7 +562,7 @@ def build_report(tracking_upload, cancel_upload, zip_uploads, email_uploads, pro
 
         if ship_obj and ship_obj > today:
             future_row = report_row.copy()
-            future_row["Reason Excluded"] = "Ship Date is after today"
+            future_row["Reason Excluded"] = "USF Date is after today"
             future_rows.append(future_row)
             continue
 
@@ -570,7 +578,7 @@ def build_report(tracking_upload, cancel_upload, zip_uploads, email_uploads, pro
 
     columns = [
         "Job No", "Order Description", "PO#", "custPONumber", "Email Found",
-        "Ship Date", "Received Date", "Paper Type", "Page Size", "Laminate", "Coating"
+        "USF Date", "Recv Date", "Paper Type", "Page Size", "Laminate", "Coating"
     ]
 
     final = pd.DataFrame(rows, columns=columns)
@@ -595,7 +603,7 @@ def build_report(tracking_upload, cancel_upload, zip_uploads, email_uploads, pro
         "Raw XML records found": xml_records,
         "Final report rows": len(final),
         "Missing Email Count": len(missing_emails),
-        "Future Ship Date Exclusions": len(future_exclusions),
+        "Future USF Date Exclusions": len(future_exclusions),
         "Open jobs accounted for": len(final) + len(future_exclusions),
     }
 
@@ -652,7 +660,7 @@ def format_worksheet(ws):
             cell.border = border
             cell.alignment = Alignment(vertical="top", wrap_text=False)
 
-            if clean_text(ws.cell(1, cell.column).value) in ["Ship Date", "Received Date"]:
+            if clean_text(ws.cell(1, cell.column).value) in ["USF Date", "Recv Date"]:
                 cell.number_format = "MM/DD/YY"
 
     ws.freeze_panes = "A2"
@@ -684,7 +692,7 @@ def write_excel(final_df, missing_emails_df, future_exclusions_df, stats):
         ].to_excel(writer, sheet_name="TRIM TO SIZE", index=False)
 
         missing_emails_df.to_excel(writer, sheet_name="MISSING EMAILS", index=False)
-        future_exclusions_df.to_excel(writer, sheet_name="FUTURE SHIP DATE EXCLUSIONS", index=False)
+        future_exclusions_df.to_excel(writer, sheet_name="FUTURE USF DATE EXCLUSIONS", index=False)
 
         summary_df = pd.DataFrame(list(stats.items()), columns=["Metric", "Value"])
         summary_df.to_excel(writer, sheet_name="SUMMARY", index=False)
@@ -706,9 +714,8 @@ st.set_page_config(page_title=APP_TITLE, page_icon="📊", layout="wide")
 st.title(APP_TITLE)
 
 st.info(
-    "v4.2: Better PO matching and email-body XML extraction. "
-    "Master report is the source of truth. Open/non-cancelled jobs stay in the report even when no email/XML is found. "
-    "Adds Email Found, MISSING EMAILS, FUTURE SHIP DATE EXCLUSIONS, and validation."
+    "v4.3: Improved email matching, cleaned XML spec extraction, renamed date columns to USF Date and Recv Date. "
+    "Master report is the source of truth. Open/non-cancelled jobs stay in the report even when no email/XML is found."
 )
 
 left, right = st.columns(2)
@@ -769,7 +776,7 @@ if st.button("Generate Report", type="primary"):
             cols = st.columns(5)
             cols[0].metric("Final Rows", stats["Final report rows"])
             cols[1].metric("Missing Emails", stats["Missing Email Count"])
-            cols[2].metric("Future Exclusions", stats["Future Ship Date Exclusions"])
+            cols[2].metric("Future Exclusions", stats["Future USF Date Exclusions"])
             cols[3].metric("XML Orders Found", stats["Embedded XML orders found"])
             cols[4].metric("Files Scanned", stats["Email/XML files scanned"])
 
@@ -778,9 +785,9 @@ if st.button("Generate Report", type="primary"):
                     f"{stats['Missing Email Count']} open jobs were retained in the report but no matching Outlook email/XML data was found."
                 )
 
-            if stats["Future Ship Date Exclusions"]:
+            if stats["Future USF Date Exclusions"]:
                 st.info(
-                    f"{stats['Future Ship Date Exclusions']} open jobs were excluded because their Ship Date is after today."
+                    f"{stats['Future USF Date Exclusions']} open jobs were excluded because their USF Date is after today."
                 )
 
             with st.expander("Processing Stats"):
@@ -801,7 +808,7 @@ if st.button("Generate Report", type="primary"):
                     st.dataframe(missing_emails_df, use_container_width=True)
 
             if not future_exclusions_df.empty:
-                with st.expander("Future Ship Date Exclusions"):
+                with st.expander("Future USF Date Exclusions"):
                     st.dataframe(future_exclusions_df, use_container_width=True)
 
             st.download_button(
